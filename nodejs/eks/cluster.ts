@@ -19,8 +19,8 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 
-import { ServiceRole } from "./servicerole";
-import { createStorageClass, EBSVolumeType, StorageClass } from "./storageclass";
+import {ServiceRole} from "./servicerole";
+import {createStorageClass, EBSVolumeType, StorageClass} from "./storageclass";
 import transform from "./transform";
 
 /**
@@ -154,10 +154,10 @@ export class Cluster extends pulumi.ComponentResource {
         let vpcId: pulumi.Input<string> = args.vpcId!;
         let subnetIds: pulumi.Input<pulumi.Input<string>[]> = args.subnetIds!;
         if (args.vpcId === undefined) {
-            const invokeOpts = { parent: this };
-            const vpc = aws.ec2.getVpc({ default: true }, invokeOpts);
+            const invokeOpts = {parent: this};
+            const vpc = aws.ec2.getVpc({default: true}, invokeOpts);
             vpcId = vpc.then(v => v.id);
-            subnetIds = vpc.then(v => aws.ec2.getSubnetIds({ vpcId: v.id }, invokeOpts)).then(subnets => subnets.ids);
+            subnetIds = vpc.then(v => aws.ec2.getSubnetIds({vpcId: v.id}, invokeOpts)).then(subnets => subnets.ids);
         }
 
         // Create the EKS service role
@@ -168,7 +168,7 @@ export class Cluster extends pulumi.ComponentResource {
                 "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy",
                 "arn:aws:iam::aws:policy/AmazonEKSServicePolicy",
             ],
-        }, { parent: this });
+        }, {parent: this});
 
         // Create the EKS cluster security group
         const allEgress = {
@@ -176,19 +176,40 @@ export class Cluster extends pulumi.ComponentResource {
             fromPort: 0,
             toPort: 0,
             protocol: "-1",  // all
-            cidrBlocks: [ "0.0.0.0/0" ],
+            cidrBlocks: ["0.0.0.0/0"],
         };
         const eksClusterSecurityGroup = new aws.ec2.SecurityGroup(`${name}-eksClusterSecurityGroup`, {
             vpcId: vpcId,
-            egress: [ allEgress ],
-        }, { parent: this });
+            egress: [allEgress],
+        }, {parent: this});
         this.clusterSecurityGroup = eksClusterSecurityGroup;
 
         // Create the EKS cluster
         const eksCluster = new aws.eks.Cluster(`${name}-eksCluster`, {
             roleArn: eksRole.role.apply(r => r.arn),
-            vpcConfig: { securityGroupIds: [ eksClusterSecurityGroup.id ], subnetIds: subnetIds },
-        }, { parent: this });
+            vpcConfig: {securityGroupIds: [eksClusterSecurityGroup.id], subnetIds: subnetIds},
+        }, {parent: this});
+
+        aws.ec2.getSubnetIds({
+            vpcId: "vpc-0c1121ed57adc00ae"
+        }).then(res => {
+            res.ids.forEach(id => {
+                let subnet = aws.ec2.Subnet.get(id, id)
+                let tags = subnet.tags.apply(s => <aws.Tags>{
+                    [`kubernetes.io/cluster/${eksCluster.name}`]: "shared",
+                })
+
+                new aws.ec2.Subnet(`${id}`, {
+                    assignIpv6AddressOnCreation: false,
+                    availabilityZone: subnet.availabilityZone,
+                    cidrBlock: subnet.cidrBlock,
+                    ipv6CidrBlock: subnet.ipv6CidrBlock,
+                    mapPublicIpOnLaunch: false,
+                    tags: tags,
+                    vpcId: subnet.vpcId
+                })
+            })
+        })
 
         // Create the instance role we'll use for worker nodes.
         this.instanceRole = (new ServiceRole(`${name}-instanceRole`, {
@@ -198,7 +219,7 @@ export class Cluster extends pulumi.ComponentResource {
                 "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy",
                 "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
             ],
-        }, { parent: this })).role;
+        }, {parent: this})).role;
         const instanceRoleARN = this.instanceRole.apply(r => r.arn);
 
         // Compute the required kubeconfig. Note that we do not export this value: we want the exported config to
@@ -206,6 +227,19 @@ export class Cluster extends pulumi.ComponentResource {
         // its worker nodes have come up.
         const myKubeconfig = pulumi.all([eksCluster.name, eksCluster.endpoint, eksCluster.certificateAuthority])
             .apply(([clusterName, clusterEndpoint, clusterCertificateAuthority]) => {
+                let exec = {
+                    apiVersion: "client.authentication.k8s.io/v1alpha1",
+                    command: "aws-iam-authenticator",
+                    args: ["token", "-i", clusterName]
+                };
+
+                exec = Object.assign({
+                    env: [{
+                        name: "AWS_PROFILE",
+                        value: "ansible"
+                    }]
+                }, exec)
+
                 return {
                     apiVersion: "v1",
                     clusters: [{
@@ -227,11 +261,7 @@ export class Cluster extends pulumi.ComponentResource {
                     users: [{
                         name: "aws",
                         user: {
-                            exec: {
-                                apiVersion: "client.authentication.k8s.io/v1alpha1",
-                                command: "aws-iam-authenticator",
-                                args: ["token", "-i", clusterName],
-                            },
+                            exec: exec
                         },
                     }],
                 };
@@ -241,7 +271,7 @@ export class Cluster extends pulumi.ComponentResource {
         // the EKS cluster.
         const k8sProvider = new k8s.Provider(`${name}-eks-k8s`, {
             kubeconfig: myKubeconfig.apply(JSON.stringify),
-        }, { parent: this });
+        }, {parent: this});
 
         // Enable access to the EKS cluster for worker nodes.
         const eksNodeAccess = new k8s.core.v1.ConfigMap(`${name}-nodeAccess`, {
@@ -253,23 +283,23 @@ export class Cluster extends pulumi.ComponentResource {
             data: {
                 mapRoles: instanceRoleARN.apply(arn => `- rolearn: ${arn}\n  username: system:node:{{EC2PrivateDNSName}}\n  groups:\n    - system:bootstrappers\n    - system:nodes\n`),
             },
-        }, { parent: this, provider: k8sProvider });
+        }, {parent: this, provider: k8sProvider});
 
         // Add any requested StorageClasses.
         const storageClasses = args.storageClasses || "gp2";
         if (typeof storageClasses === "string") {
-            const storageClass = { type: storageClasses, default: true };
-            createStorageClass(`${name.toLowerCase()}-${storageClasses}`, storageClass, { parent: this, provider: k8sProvider });
+            const storageClass = {type: storageClasses, default: true};
+            createStorageClass(`${name.toLowerCase()}-${storageClasses}`, storageClass, {parent: this, provider: k8sProvider});
         } else {
             for (const key of Object.keys(storageClasses)) {
-                createStorageClass(`${name.toLowerCase()}-${key}`, storageClasses[key], { parent: this, provider: k8sProvider });
+                createStorageClass(`${name.toLowerCase()}-${key}`, storageClasses[key], {parent: this, provider: k8sProvider});
             }
         }
 
         // Create the cluster's worker nodes.
         const instanceProfile = new aws.iam.InstanceProfile(`${name}-instanceProfile`, {
             role: this.instanceRole,
-        }, { parent: this });
+        }, {parent: this});
         const nodeSecurityGroup = new aws.ec2.SecurityGroup(`${name}-nodeSecurityGroup`, {
             vpcId: vpcId,
             ingress: [
@@ -285,21 +315,21 @@ export class Cluster extends pulumi.ComponentResource {
                     fromPort: 1025,
                     toPort: 65535,
                     protocol: "tcp",
-                    securityGroups: [ eksClusterSecurityGroup.id ],
+                    securityGroups: [eksClusterSecurityGroup.id],
                 },
                 {
                     description: "Allow pods running extension API servers on port 443 to receive communication from cluster control plane",
                     fromPort: 443,
                     toPort: 443,
                     protocol: "tcp",
-                    securityGroups: [ eksClusterSecurityGroup.id ],
+                    securityGroups: [eksClusterSecurityGroup.id],
                 },
             ],
-            egress: [ allEgress ],
+            egress: [allEgress],
             tags: eksCluster.name.apply(n => <aws.Tags>{
                 [`kubernetes.io/cluster/${n}`]: "owned",
             }),
-        }, { parent: this });
+        }, {parent: this});
         const eksClusterIngressRule = new aws.ec2.SecurityGroupRule(`${name}-eksClusterIngressRule`, {
             description: "Allow pods to communicate with the cluster API Server",
             type: "ingress",
@@ -308,7 +338,7 @@ export class Cluster extends pulumi.ComponentResource {
             protocol: "tcp",
             securityGroupId: eksClusterSecurityGroup.id,
             sourceSecurityGroupId: nodeSecurityGroup.id,
-        }, { parent: this });
+        }, {parent: this});
         const nodeSecurityGroupId = pulumi.all([nodeSecurityGroup.id, eksClusterIngressRule.id])
             .apply(([id]) => id);
         this.nodeSecurityGroup = nodeSecurityGroup;
@@ -318,13 +348,13 @@ export class Cluster extends pulumi.ComponentResource {
         if (args.nodePublicKey) {
             const key = new aws.ec2.KeyPair(`${name}-keyPair`, {
                 publicKey: args.nodePublicKey,
-            }, { parent: this });
+            }, {parent: this});
             keyName = key.keyName;
         }
 
-        const cfnStackName = transform(`${name}-cfnStackName`, name, n => `${n}-${crypto.randomBytes(4).toString("hex")}`, { parent: this });
+        const cfnStackName = transform(`${name}-cfnStackName`, name, n => `${n}-${crypto.randomBytes(4).toString("hex")}`, {parent: this});
 
-        const awsRegion = pulumi.output(aws.getRegion({}, { parent: this }));
+        const awsRegion = pulumi.output(aws.getRegion({}, {parent: this}));
         const userdata = pulumi.all([awsRegion, eksCluster.name, eksCluster.endpoint, eksCluster.certificateAuthority, cfnStackName])
             .apply(([region, clusterName, clusterEndpoint, clusterCa, stackName]) => {
                 return `#!/bin/bash
@@ -336,25 +366,25 @@ export class Cluster extends pulumi.ComponentResource {
         const eksWorkerAmi = aws.getAmi({
             filters: [{
                 name: "name",
-                values: [ "amazon-eks-node-*" ],
+                values: ["amazon-eks-node-*"],
             }],
             mostRecent: true,
-            owners: [ "602401143452" ], // Amazon
-        }, { parent: this });
+            owners: ["602401143452"], // Amazon
+        }, {parent: this});
         const nodeLaunchConfiguration = new aws.ec2.LaunchConfiguration(`${name}-nodeLaunchConfiguration`, {
             associatePublicIpAddress: true,
             imageId: eksWorkerAmi.then(r => r.imageId),
             instanceType: args.instanceType || "t2.medium",
             iamInstanceProfile: instanceProfile.id,
             keyName: keyName,
-            securityGroups: [ nodeSecurityGroupId ],
+            securityGroups: [nodeSecurityGroupId],
             rootBlockDevice: {
                 volumeSize: args.nodeRootVolumeSize || 20, // GiB
                 volumeType: "gp2", // default is "standard"
                 deleteOnTermination: true,
             },
             userData: userdata,
-        }, { parent: this });
+        }, {parent: this});
 
         const cfnSubnetIds = pulumi.output(subnetIds).apply(ids => pulumi.all(ids.map(pulumi.output))).apply(ids => JSON.stringify(ids));
         const cfnTemplateBody = pulumi.all([
@@ -391,7 +421,7 @@ export class Cluster extends pulumi.ComponentResource {
         const cfnStack = new aws.cloudformation.Stack(`${name}-nodes`, {
             name: cfnStackName,
             templateBody: cfnTemplateBody,
-        }, { parent: this, dependsOn: eksNodeAccess });
+        }, {parent: this, dependsOn: eksNodeAccess});
 
         // Export the cluster's kubeconfig with a dependency upon the cluster's autoscaling group. This will help
         // ensure that the cluster's consumers do not attempt to use the cluster until its workers are attached.
@@ -401,7 +431,7 @@ export class Cluster extends pulumi.ComponentResource {
         // in order to help ensure that worker nodes are available before the provider can be used.
         this.provider = new k8s.Provider(`${name}-provider`, {
             kubeconfig: this.kubeconfig.apply(JSON.stringify),
-        }, { parent: this });
+        }, {parent: this});
 
         // If we need to deploy the Kubernetes dashboard, do so now.
         if (args.deployDashboard === undefined || args.deployDashboard) {
@@ -414,7 +444,7 @@ export class Cluster extends pulumi.ComponentResource {
             ].map(filePath => fs.readFileSync(filePath).toString());
             const dashboard = new k8s.yaml.ConfigGroup(`${name}-dashboard`, {
                 yaml: dashboardYaml,
-            }, { parent: this, providers: { kubernetes: this.provider } });
+            }, {parent: this, providers: {kubernetes: this.provider}});
 
             // Create a service account for admin access.
             const adminAccount = new k8s.core.v1.ServiceAccount(`${name}-eks-admin`, {
@@ -422,7 +452,7 @@ export class Cluster extends pulumi.ComponentResource {
                     name: "eks-admin",
                     namespace: "kube-system",
                 },
-            }, { parent: this, provider: this.provider });
+            }, {parent: this, provider: this.provider});
 
             // Create a role binding for the admin account.
             const adminRoleBinding = new k8s.rbac.v1.ClusterRoleBinding(`${name}-eks-admin`, {
@@ -439,9 +469,9 @@ export class Cluster extends pulumi.ComponentResource {
                     name: "eks-admin",
                     namespace: "kube-system",
                 }],
-            }, { parent: this, provider: this.provider });
+            }, {parent: this, provider: this.provider});
         }
 
-        this.registerOutputs({ kubeconfig: this.kubeconfig });
+        this.registerOutputs({kubeconfig: this.kubeconfig});
     }
 }
