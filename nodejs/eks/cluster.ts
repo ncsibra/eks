@@ -190,27 +190,6 @@ export class Cluster extends pulumi.ComponentResource {
             vpcConfig: {securityGroupIds: [eksClusterSecurityGroup.id], subnetIds: subnetIds},
         }, {parent: this});
 
-        aws.ec2.getSubnetIds({
-            vpcId: "vpc-0c1121ed57adc00ae"
-        }).then(res => {
-            res.ids.forEach(id => {
-                let subnet = aws.ec2.Subnet.get(id, id)
-                let tags = subnet.tags.apply(s => <aws.Tags>{
-                    [`kubernetes.io/cluster/${eksCluster.name}`]: "shared",
-                })
-
-                new aws.ec2.Subnet(`${id}`, {
-                    assignIpv6AddressOnCreation: false,
-                    availabilityZone: subnet.availabilityZone,
-                    cidrBlock: subnet.cidrBlock,
-                    ipv6CidrBlock: subnet.ipv6CidrBlock,
-                    mapPublicIpOnLaunch: false,
-                    tags: tags,
-                    vpcId: subnet.vpcId
-                })
-            })
-        })
-
         // Create the instance role we'll use for worker nodes.
         this.instanceRole = (new ServiceRole(`${name}-instanceRole`, {
             service: "ec2.amazonaws.com",
